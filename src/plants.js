@@ -75,10 +75,11 @@ export function initPlants(scene, terrain) {
   for (let i = 0; i < positions.length; i++) {
     const pos = positions[i];
 
-    const genMax = THREE.MathUtils.randInt(3, 5);
-    const angleDeg = THREE.MathUtils.randFloat(25, 38);
-    const step = THREE.MathUtils.randFloat(1.8, 3.0);
-    const baseRadius = THREE.MathUtils.randFloat(0.18, 0.28);
+    // 비정형 유기체 스타일 파라미터
+    const genMax = THREE.MathUtils.randInt(4, 6); // 세대 증가
+    const angleDeg = THREE.MathUtils.randFloat(15, 35); // 각도 범위 넓게
+    const step = THREE.MathUtils.randFloat(1.2, 2.5); // 짧은 세그먼트
+    const baseRadius = THREE.MathUtils.randFloat(0.12, 0.22); // 가는 줄기
     const heatLevel = THREE.MathUtils.randFloat(0.25, 0.55);
     const electricNoise = THREE.MathUtils.randFloat(0.15, 0.4);
     const ioVibration = THREE.MathUtils.randFloat(0.08, 0.22);
@@ -88,17 +89,17 @@ export function initPlants(scene, terrain) {
     const lsys = createLSystem(scene, {
       genMax,
       angleDeg,
-      decay: 0.87,
+      decay: 0.90, // 더 천천히 감쇠
       step,
       baseRadius,
       animateSpeed,
-      scaleY: THREE.MathUtils.randFloat(0.9, 1.3),
+      scaleY: THREE.MathUtils.randFloat(1.1, 1.6), // 더 높게
       scaleX: 1.0,
-      radiusDecay: THREE.MathUtils.randFloat(0.78, 0.85),
-      branchProb: THREE.MathUtils.randFloat(0.75, 0.92),
-      bendFactor: THREE.MathUtils.randFloat(0.1, 0.18),
-      twistY: THREE.MathUtils.randFloat(0.04, 0.1),
-      asymmetry: THREE.MathUtils.randFloat(0.25, 0.4),
+      radiusDecay: THREE.MathUtils.randFloat(0.82, 0.90), // 천천히 가늘어짐
+      branchProb: THREE.MathUtils.randFloat(0.85, 0.98), // 분기 확률 높게
+      bendFactor: THREE.MathUtils.randFloat(0.20, 0.35), // 더 많이 휘어짐
+      twistY: THREE.MathUtils.randFloat(0.08, 0.15), // 더 많이 비틀림
+      asymmetry: THREE.MathUtils.randFloat(0.40, 0.60), // 비대칭 강화
       heatLevel,
       electricNoise,
       ioVibration,
@@ -129,8 +130,8 @@ export function initPlants(scene, terrain) {
   if (_lsystems.length > 0) {
     setupLSystemControls(_lsystems, () => {
       for (const lsys of _lsystems) {
+        // plantMesh를 제거하면 자식인 chargeMesh도 자동 제거됨
         _scene.remove(lsys.plantMesh);
-        if (lsys.chargeMesh) _scene.remove(lsys.chargeMesh);
       }
       _lsystems = [];
       initPlants(_scene, _terrain);

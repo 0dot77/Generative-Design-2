@@ -14,20 +14,20 @@
 │  • 전체 초기화 관리                      │
 │  • 애니메이션 루프                       │
 │  • 모듈 통합                             │
-└──┬────┬────┬────┬────┬───────────────────┘
-   │    │    │    │    │
-   │    │    │    │    └──────┐
-   │    │    │    │           │
-   ▼    ▼    ▼    ▼           ▼
-┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐
-│scene │ │ hud  │ │terrain│ │boids │ │plants│
-│ .js  │ │ .js  │ │ .js  │ │ .js  │ │ .js  │
-└──────┘ └──────┘ └──┬───┘ └──────┘ └──┬───┘
-                     │                  │
-                     │                  ▼
-                     │            ┌──────────┐
-                     │            │ lsystem  │
-                     │            │   .js    │
+└──┬────┬────┬────┬────┬────┬─────────────┘
+   │    │    │    │    │    │
+   │    │    │    │    │    └──────┐
+   │    │    │    │    │           │
+   ▼    ▼    ▼    ▼    ▼           ▼
+┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌────────────┐
+│scene │ │ hud  │ │terrain│ │boids │ │plants│ │interaction │
+│ .js  │ │ .js  │ │ .js  │ │ .js  │ │ .js  │ │    .js     │
+└──────┘ └──────┘ └──┬───┘ └──────┘ └──┬───┘ └─────┬──────┘
+                     │                  │           │
+                     │                  ▼           │
+                     │            ┌──────────┐      │
+                     │            │ lsystem  │◄─────┘
+                     │            │   .js    │ (식물 상태 제어)
                      │            └────┬─────┘
                      │                 │
                      ▼                 ▼
@@ -47,7 +47,8 @@ import { createScene, setupLights, setupControls, setupResize } from './scene.js
 import { createHUD } from './hud.js'
 import { createTerrain } from './terrain.js'
 import { initBoids, updateBoids } from './boids.js'
-import { initPlants, updatePlants } from './plants.js'
+import { initPlants, updatePlants, getPlants } from './plants.js'
+import { initInteraction, updateInteraction } from './interaction.js'
 ```
 
 ### boids.js
@@ -95,6 +96,13 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 // 순수 JavaScript (Three.js 의존 없음)
 ```
 
+### interaction.js
+```javascript
+import * as THREE from 'three'
+
+// 외부 의존: camera, scene, plants 배열, renderer (initInteraction 시 전달)
+```
+
 ---
 
 ## 🔄 데이터 흐름
@@ -118,7 +126,9 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
    ↓
 8. initPlants(scene, terrain) → 식물 초기화
    ↓
-9. animate() 루프 시작
+9. initInteraction(camera, scene, plants, renderer) → 마우스 인터랙션
+   ↓
+10. animate() 루프 시작
 ```
 
 ### 애니메이션 루프
@@ -141,11 +151,16 @@ animate() 매 프레임:
      - 전하 구슬 애니메이션
      - 환경 반응 (색상/발광)
   ↓
-  5. renderer.render(scene, camera)
+  5. updateInteraction(time, dt)
+     - 마우스 커서 위치 업데이트
+     - 휴면 상태 관리
+     - 시각 효과 (원형 표시)
   ↓
-  6. hud.update(frameTime) → FPS 갱신
+  6. renderer.render(scene, camera)
   ↓
-  7. requestAnimationFrame(animate)
+  7. hud.update(frameTime) → FPS 갱신
+  ↓
+  8. requestAnimationFrame(animate)
 ```
 
 ---
@@ -161,6 +176,7 @@ animate() 매 프레임:
 | **boids.js** | 군집 알고리즘, 충돌/경계 | GLTFLoader, terrain |
 | **plants.js** | 식물 배치, 환경 반응 | lsystem.js, terrain |
 | **lsystem.js** | L-System 규칙, 생성 | BufferGeometryUtils |
+| **interaction.js** | 마우스 인터랙션, 휴면 제어 | camera, scene, plants |
 
 ---
 
@@ -221,6 +237,19 @@ export function createHUD() → {
 }
 ```
 
+### interaction.js
+```javascript
+export function initInteraction(camera, scene, plants, renderer) → void
+export function updateInteraction(time, dt) → void
+export function getInteractionState() → {
+  mouseWorld: Vector3,
+  clickRadius: float,
+  dormantCount: number,
+  dormantPlants: Array<string>
+}
+export function disposeInteraction() → void
+```
+
 ---
 
 ## 🎛️ 설정 가능 파라미터
@@ -248,6 +277,13 @@ export function createHUD() → {
 - angleDeg, decay, genMax, step, baseRadius
 - heatLevel, electricNoise, idleCycles
 - mergeRadius, mergeAngleTol
+
+### interaction.js
+- clickRadius (영향 범위, 기본 15.0)
+- dormantDuration (휴면 지속 시간, 기본 10초)
+- 시각화:
+  - 커서 원형: 시안 (#00d9ff, 네트워크 상태)
+  - 클릭 효과: 주황 (#ff6b35, 휴면 상태)
 
 ---
 
@@ -282,6 +318,23 @@ _terrain: Terrain
 _lsystems: Array<LSystem>
 _terrain: Terrain
 _scene: THREE.Scene
+```
+
+### interaction.js (모듈 내부)
+```javascript
+mouseState: {
+  position: Vector2,         // 정규화된 화면 좌표 (-1~1)
+  worldPosition: Vector3,    // 월드 3D 좌표
+  isClicked: boolean,
+  clickRadius: float
+}
+dormantState: Map<uuid, {
+  startTime: timestamp,
+  duration: number,
+  originalMaterial: Material
+}>
+cursorCircle: Mesh           // 커서 시각화 (시안 원형)
+effectCircle: Mesh           // 클릭 효과 (주황 원형)
 ```
 
 ---

@@ -87,7 +87,7 @@ function shouldSpawnCharge(state) {
 }
 
 /* ========================= 
- * L-System 규칙 생성기
+ * L-System 규칙 생성기 (비정형 유기체 형태)
  * ========================= */
 function applyRules(axiom, gen) {
   let current = axiom;
@@ -97,19 +97,31 @@ function applyRules(axiom, gen) {
       const c = current[i];
       switch (c) {
         case "F": {
-          // R1: F → F[+a F][-a F] (2-branch)
-          // R1b: 확률적으로 3-branch
           const boost = getGrowthBoost();
-          if (Math.random() < branchProb * boost) {
-            if (Math.random() < 0.3) {
-              // 3-branch
-              next += "F[+F][+F][-F]";
-            } else {
-              // 2-branch
-              next += "F[+F][-F]";
-            }
+          const r = Math.random();
+          
+          // 비정형 패턴: 다양한 분기 규칙
+          if (r < 0.15 * branchProb * boost) {
+            // 1. 나선형 패턴 (이미지 상단)
+            next += "F[+F+F][--F]F";
+          } else if (r < 0.30 * branchProb * boost) {
+            // 2. 비대칭 곡선 분기
+            next += "F[+++F][-F--F]";
+          } else if (r < 0.45 * branchProb * boost) {
+            // 3. 한쪽으로 치우친 분기
+            next += "F[+F+F+F]F";
+          } else if (r < 0.60 * branchProb * boost) {
+            // 4. 약한 분기 + 주 줄기 굽힘
+            next += "+F[+F]F";
+          } else if (r < 0.75 * branchProb * boost) {
+            // 5. 반대 방향 분기
+            next += "-F[-F-F]F";
+          } else if (r < 0.85 * branchProb * boost) {
+            // 6. 다층 분기
+            next += "F[+F[+F]][-F]";
           } else {
-            next += "F"; // 분기 없이 직진
+            // 7. 직진 + 약간의 흔들림
+            next += (Math.random() > 0.5 ? "+" : "-") + "F";
           }
           break;
         }
@@ -388,19 +400,19 @@ function segmentsToGeometry(segments) {
     const right = new THREE.Vector3().crossVectors(dir, perpVec).normalize();
     const up = new THREE.Vector3().crossVectors(right, dir).normalize();
     
-    // 색상: 세대/타입별
+    // 색상: 세대/타입별 (서버실 메탈 그라데이션)
     let baseColor = new THREE.Color();
     if (type === "coil") {
       baseColor.setHex(0xff6b35); // 주황(휴면)
     } else if (type === "bridge" || type === "stabilize") {
       baseColor.setHex(0x00d9ff); // 시안(그물)
     } else {
-      // 일반: 구리 → 금색 그라데이션
+      // 일반: 어두운 금속 → 밝은 금속 그라데이션 (서버 랙 톤)
       const t = Math.min(1, gen / genMax);
       baseColor.lerpColors(
-        new THREE.Color(0xb87333), // 구리
-        new THREE.Color(0xffd700), // 금색
-        t
+        new THREE.Color(0x292D38), // METAL_LO (어두운 금속 #292D38)
+        new THREE.Color(0x9EB2C7), // METAL_HI (밝은 금속 #9EB2C7)
+        t * 0.7 + 0.3 // 0.3~1.0 범위로 매핑 (너무 어두워지지 않게)
       );
     }
     
@@ -608,17 +620,17 @@ export function createLSystem(scene, params = {}) {
     transparent: true,
     opacity: 0.95,
     side: THREE.DoubleSide,
-    roughness: 0.4,
-    metalness: 0.6,
-    emissive: new THREE.Color(0x222222),
-    emissiveIntensity: 0.3,
+    roughness: 0.55,      // 약간 더 거친 금속 표면 (0.4 → 0.55)
+    metalness: 0.75,      // 더 강한 금속성 (0.6 → 0.75)
+    emissive: new THREE.Color(0x0f1419), // 어두운 청회색 발광 (서버실 톤)
+    emissiveIntensity: 0.2, // 발광 강도 약간 낮춤 (0.3 → 0.2)
   });
   const plantMesh = new THREE.Mesh(plantGeom, plantMat);
   plantMesh.position.set(params.posX ?? 0, params.posY ?? 0, params.posZ ?? 0);
   scene.add(plantMesh);
   console.log(`[L-System] 메쉬 위치: (${plantMesh.position.x}, ${plantMesh.position.y}, ${plantMesh.position.z})`);
   
-  // 5) 전하 구슬 (발광 효과)
+  // 5) 전하 구슬 (발광 효과) - 식물에 붙도록 자식으로 설정
   let chargeMesh = null;
   if (charges.length > 0) {
     const chargeGeom = chargesToGeometry(charges);
@@ -632,9 +644,10 @@ export function createLSystem(scene, params = {}) {
       metalness: 0.8,
     });
     chargeMesh = new THREE.Mesh(chargeGeom, chargeMat);
-    chargeMesh.position.copy(plantMesh.position);
-    scene.add(chargeMesh);
-    console.log(`[L-System] 전하 구슬 ${charges.length}개 생성`);
+    // 중요: plantMesh의 자식으로 추가 (로컬 좌표계)
+    chargeMesh.position.set(0, 0, 0); // 로컬 좌표 원점
+    plantMesh.add(chargeMesh); // scene이 아닌 plantMesh에 추가
+    console.log(`[L-System] 전하 구슬 ${charges.length}개 생성 (식물에 부착)`);
   } else {
     console.log(`[L-System] 전하 구슬 생성 조건 미충족 (idleCycles=${idleCycles})`);
   }
@@ -647,8 +660,8 @@ export function createLSystem(scene, params = {}) {
     chargeMesh,
     animator,
     regenerate: (newParams) => {
+      // plantMesh를 제거하면 자식인 chargeMesh도 자동 제거됨
       scene.remove(plantMesh);
-      if (chargeMesh) scene.remove(chargeMesh);
       return createLSystem(scene, { ...params, ...newParams });
     },
   };

@@ -4,7 +4,8 @@ import { createScene, setupLights, setupControls, setupResize } from "./scene.js
 import { createHUD } from "./hud.js";
 import { createTerrain } from "./terrain.js";
 import { initBoids, updateBoids } from "./boids.js";
-import { initPlants, updatePlants } from "./plants.js";
+import { initPlants, updatePlants, getPlants } from "./plants.js";
+import { initInteraction, updateInteraction } from "./interaction.js";
 
 /* ========================= 
  * 애플리케이션 상태
@@ -73,6 +74,12 @@ async function init() {
   state.plantsReady = true;
   console.log("[Main] ✅ 식물 초기화 완료");
 
+  // 9. 마우스 인터랙션 초기화
+  console.log("[Main] 마우스 인터랙션 초기화 중...");
+  const plants = getPlants();
+  initInteraction(camera, scene, plants, renderer);
+  console.log("[Main] ✅ 마우스 인터랙션 초기화 완료");
+
   console.log("[Main] 🎉 모든 초기화 완료!");
   console.log("[Main] 애니메이션 루프 시작...");
 }
@@ -101,6 +108,9 @@ function animate() {
   if (state.plantsReady) {
     updatePlants(time, dt);
   }
+
+  // 마우스 인터랙션 업데이트
+  updateInteraction(time, dt);
 
   // 렌더링
   state.renderer.render(state.scene, state.camera);
