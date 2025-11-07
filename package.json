@@ -1,0 +1,23 @@
+{
+  "name": "generative-design-2025-server-garden",
+  "version": "1.0.0",
+  "description": "서버실 환경에서 자라나는 전선 식물 시뮬레이션 - L-System + Boids + Procedural Terrain",
+  "type": "module",
+  "scripts": {
+    "dev": "python3 -m http.server 8080",
+    "start": "python3 -m http.server 8080"
+  },
+  "keywords": [
+    "generative-design",
+    "three.js",
+    "l-system",
+    "boids",
+    "procedural",
+    "simulation"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {}
+}
+
