@@ -15,6 +15,7 @@ export function createHUD() {
       borderRadius: "6px",
       zIndex: 9999,
       pointerEvents: "none",
+      whiteSpace: "pre", // 줄바꿈 유지
     });
     document.body.appendChild(hud);
   }
@@ -25,7 +26,11 @@ export function createHUD() {
   
   return {
     element: hud,
-    update: (frameTime) => {
+    /**
+     * @param {number} frameTime - 이번 프레임 렌더링 시간(ms)
+     * @param {object|null} gaStats - GA 요약 정보 (generation, patternCounts 등)
+     */
+    update: (frameTime, gaStats = null) => {
       frames++;
       accMs += frameTime;
       const now = performance.now();
@@ -33,7 +38,24 @@ export function createHUD() {
       if (now - lastTime >= 1000) {
         const fps = Math.round((frames * 1000) / (now - lastTime));
         const avg = (accMs / frames).toFixed(1);
-        hud.textContent = `FPS: ${fps} | Avg: ${avg} ms`;
+        let text = `FPS: ${fps} | Avg: ${avg} ms`;
+
+        if (gaStats) {
+          const gen = gaStats.generation ?? 0;
+          const pc = gaStats.patternCounts || [0, 0, 0, 0, 0];
+          const avgScale = gaStats.avgScale?.toFixed(2) ?? "–";
+          const avgSpeed = gaStats.avgSpeed?.toFixed(2) ?? "–";
+          const avgShow = gaStats.avgShow?.toFixed(2) ?? "–";
+          const bestFit =
+            typeof gaStats.bestFitness === "number"
+              ? gaStats.bestFitness.toFixed(2)
+              : "–";
+
+          text += `\nGen ${gen} | P0:${pc[0] ?? 0} P1:${pc[1] ?? 0} P2:${pc[2] ?? 0} P3:${pc[3] ?? 0} P4:${pc[4] ?? 0}`;
+          text += `\n⌀scale:${avgScale} ⌀spd:${avgSpeed} ⌀show:${avgShow} | best:${bestFit}`;
+        }
+
+        hud.textContent = text;
         frames = 0;
         accMs = 0;
         lastTime = now;

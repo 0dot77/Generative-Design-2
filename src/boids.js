@@ -3,9 +3,36 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import * as BufferGeometryUtils from "three/addons/utils/BufferGeometryUtils.js";
 
+// RD 패턴 텍스처 경로 (GA 설계 기반)
+const RD_TEXTURE_PATHS = [
+  "./assets/textures/rd_pattern.png", // 0
+  "./assets/textures/rd_pattern2.png", // 1
+  "./assets/textures/rd_pattern3.png", // 2
+  "./assets/textures/rd_pattern4.png", // 3
+  "./assets/textures/rd_pattern5.png", // 4
+];
+
+// 텍스처 로드 (InstancedMesh 제약으로 현재는 "공통 RD 패턴 + 색/동작" 차별화에 사용)
+const _rdTextures = [];
+const _texLoader = new THREE.TextureLoader();
+for (const path of RD_TEXTURE_PATHS) {
+  const tex = _texLoader.load(
+    path,
+    () => {
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.needsUpdate = true;
+    },
+    undefined,
+    () => {
+      console.warn(`[Boids] RD texture load failed: ${path}`);
+    }
+  );
+  _rdTextures.push(tex);
+}
+
 // Boids 파라미터
 const CONFIG = {
-  count: 120,
+  count: 40, // GA populationSize와 맞춤
   maxSpeed: 10.0,
   maxForce: 3.5,
   neighborRadius: 8.0,
@@ -30,6 +57,77 @@ const _vel = [];
 const _acc = [];
 const _dummyObj = new THREE.Object3D();
 let _terrain = null;
+
+// GA 연동: Genome / 생애 상태
+const _genomes = []; // index → Genome
+const _baseColors = []; // index → THREE.Color
+const _states = []; // "alive" | "dying" | "dead" | "newborn"
+const _deathTimers = [];
+const _newbornTimers = [];
+let _deathDuration = 2.0;
+let _newbornDuration = 1.0;
+let _simTime = 0;
+let _generationTint = new THREE.Color(0xffffff);
+
+const STATE_ALIVE = "alive";
+const STATE_DYING = "dying";
+const STATE_DEAD = "dead";
+const STATE_NEWBORN = "newborn";
+
+// 패턴별 색상 악센트 (시각적으로 명확히 구분되도록)
+// - 서버실 톤을 유지하면서도 hue/sat를 달리 줘서 한눈에 패턴이 보이게 한다.
+const PATTERN_ACCENT_COLORS = [
+  new THREE.Color(0x00d9ff), // A: 시안 계열 (soft_spots)
+  new THREE.Color(0x5eff7e), // B: 연두/그린 (micro_spots)
+  new THREE.Color(0x3b7bff), // C: 코발트 블루 (blobs)
+  new THREE.Color(0xff7bff), // D: 마젠타 계열 (fine_stripes)
+  new THREE.Color(0xffc54b), // E: 앰버/골드 (hybrid)
+];
+
+/* ========================= 
+ * 유틸리티 (색 변환)
+ * ========================= */
+function hsvToRgb(h, s, v) {
+  // h: 0~360, s: 0~1, v: 0~1
+  h = ((h % 360) + 360) % 360;
+  const c = v * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = v - c;
+  let r = 0,
+    g = 0,
+    b = 0;
+  if (h < 60) {
+    r = c;
+    g = x;
+  } else if (h < 120) {
+    r = x;
+    g = c;
+  } else if (h < 180) {
+    g = c;
+    b = x;
+  } else if (h < 240) {
+    g = x;
+    b = c;
+  } else if (h < 300) {
+    r = x;
+    b = c;
+  } else {
+    r = c;
+    b = x;
+  }
+  return { r: r + m, g: g + m, b: b + m };
+}
+
+function createFallbackGenome() {
+  return {
+    hue: 190,
+    value: 0.6,
+    patternId: 0,
+    bodyScale: 1.0,
+    baseSpeed: 1.0,
+    showOff: 0.3,
+  };
+}
 
 /* ========================= 
  * 지오메트리 유틸리티
@@ -185,11 +283,13 @@ function limitVec3(v, maxLen) {
   return v;
 }
 
-function updateBoidsLogic(dt) {
+function updateBoidsLogic(dt, t) {
+  _simTime = t;
   const N = CONFIG.count;
   for (let i = 0; i < N; i++) _acc[i].set(0, 0, 0);
 
   for (let i = 0; i < N; i++) {
+    if (_states[i] === STATE_DEAD) continue;
     const pi = _pos[i];
     const vi = _vel[i];
     let sumV = new THREE.Vector3();
@@ -198,7 +298,7 @@ function updateBoidsLogic(dt) {
     let cnt = 0;
 
     for (let j = 0; j < N; j++)
-      if (j !== i) {
+      if (j !== i && _states[j] !== STATE_DEAD) {
         const pj = _pos[j];
         const d = pi.distanceTo(pj);
         if (d < CONFIG.neighborRadius) {
@@ -211,11 +311,14 @@ function updateBoidsLogic(dt) {
       }
 
     const acc = _acc[i];
+    const genome = _genomes[i];
+    const speedFactor = genome && typeof genome.baseSpeed === "number" ? genome.baseSpeed : 1.0;
+
     if (cnt > 0) {
       const align = sumV.multiplyScalar(1 / cnt).setY(0);
       align
         .normalize()
-        .multiplyScalar(CONFIG.maxSpeed)
+        .multiplyScalar(CONFIG.maxSpeed * speedFactor)
         .sub(vi)
         .clampLength(0, CONFIG.maxForce);
       acc.addScaledVector(align, CONFIG.alignWeight);
@@ -224,7 +327,7 @@ function updateBoidsLogic(dt) {
       const cohesion = center.sub(pi).setY(0);
       cohesion
         .normalize()
-        .multiplyScalar(CONFIG.maxSpeed)
+        .multiplyScalar(CONFIG.maxSpeed * speedFactor)
         .sub(vi)
         .clampLength(0, CONFIG.maxForce);
       acc.addScaledVector(cohesion, CONFIG.cohesionWeight);
@@ -233,7 +336,7 @@ function updateBoidsLogic(dt) {
     if (sep.lengthSq() > 0) {
       sep
         .normalize()
-        .multiplyScalar(CONFIG.maxSpeed)
+        .multiplyScalar(CONFIG.maxSpeed * speedFactor)
         .sub(vi)
         .clampLength(0, CONFIG.maxForce);
       acc.addScaledVector(sep, CONFIG.separationWeight);
@@ -245,10 +348,24 @@ function updateBoidsLogic(dt) {
 
   const terrainSize = { width: 200, depth: 200 };
   for (let i = 0; i < N; i++) {
+    const state = _states[i];
+    const genome = _genomes[i];
+    const speedFactor = genome && typeof genome.baseSpeed === "number" ? genome.baseSpeed : 1.0;
+
+    if (state === STATE_DEAD) {
+      // 죽은 개체는 보이지 않도록 매우 작은 스케일로 고정
+      _dummyObj.position.copy(_pos[i]);
+      _dummyObj.scale.setScalar(0.0001);
+      _dummyObj.rotation.set(0, 0, 0);
+      _dummyObj.updateMatrix();
+      _boidInst.setMatrixAt(i, _dummyObj.matrix);
+      continue;
+    }
+
     const p = _pos[i];
     const v = _vel[i];
     const a = _acc[i];
-    v.addScaledVector(a, dt);
+    v.addScaledVector(a, dt * speedFactor);
     confineToTerrain({ pos: p, vel: v }, terrainSize, CONFIG.boundMargin, CONFIG.boundSteer);
     followSurface(
       { pos: p, vel: v },
@@ -256,33 +373,129 @@ function updateBoidsLogic(dt) {
       CONFIG.surfHover,
       CONFIG.surfSlide
     );
-    limitVec3(v, CONFIG.maxSpeed);
+    limitVec3(v, CONFIG.maxSpeed * speedFactor);
     p.addScaledVector(v, dt);
 
+    // 기본 회전 (진행 방향)
     const yaw = Math.atan2(v.x, v.z);
+    let pitch = 0;
+    let roll = 0;
+
+    // showOff에 따른 요란한 진동
+    const show =
+      genome && typeof genome.showOff === "number" ? genome.showOff : 0.3;
+    if (show > 0) {
+      const phase = i * 0.37;
+      const wobble = Math.sin(_simTime * 3.0 + phase) * show;
+      pitch = wobble * 0.6; // 훨씬 큰 굴절
+      roll = Math.cos(_simTime * 2.2 + phase * 1.7) * show * 0.6;
+    }
+
+    // 기본 스케일 + genome bodyScale + 생애 상태 애니메이션
+    const baseScale = genome && typeof genome.bodyScale === "number"
+      ? genome.bodyScale * CONFIG.scale
+      : CONFIG.scale;
+
+    let scaleMul = 1.0;
+    if (state === STATE_DYING) {
+      _deathTimers[i] += dt;
+      const tNorm = Math.min(1.0, _deathTimers[i] / _deathDuration);
+      scaleMul = THREE.MathUtils.lerp(1.0, 0.2, tNorm);
+      p.y -= 0.4 * dt; // 천천히 가라앉는 느낌
+      if (_deathTimers[i] >= _deathDuration) {
+        _states[i] = STATE_DEAD;
+        scaleMul = 0.0001;
+      }
+    } else if (state === STATE_NEWBORN) {
+      _newbornTimers[i] += dt;
+      const tNorm = Math.min(1.0, _newbornTimers[i] / _newbornDuration);
+      scaleMul = THREE.MathUtils.lerp(0.2, 1.0, tNorm);
+      if (_newbornTimers[i] >= _newbornDuration) {
+        _states[i] = STATE_ALIVE;
+      }
+    }
+
+    const finalScale = baseScale * scaleMul;
+
+    // 인스턴스 색상: baseColor + 상태에 따른 보정
+    const baseColor = _baseColors[i] || new THREE.Color(0x0099ad);
+    const col = baseColor.clone();
+    if (state === STATE_DYING) {
+      const tNorm = Math.min(1.0, _deathTimers[i] / _deathDuration);
+      col.lerp(new THREE.Color(0x000000), tNorm); // 점점 어둡게
+    } else if (state === STATE_NEWBORN) {
+      const tNorm = Math.min(1.0, _newbornTimers[i] / _newbornDuration);
+      // 살짝 더 밝게 반짝였다가 정상으로
+      const glow = baseColor.clone().offsetHSL(0, 0, 0.2);
+      col.lerp(glow, 1.0 - Math.abs(1.0 - 2.0 * tNorm)); // 중간에서 가장 밝게
+    }
+    // 세대별 틴트 적용 (기존 텍스처/색 위에 세대 색을 곱해 전반적인 톤을 바꾼다)
+    col.multiply(_generationTint);
+    if (_boidInst && _boidInst.setColorAt) {
+      _boidInst.setColorAt(i, col);
+    }
+
     _dummyObj.position.copy(p);
-    _dummyObj.rotation.set(0, yaw, 0);
-    _dummyObj.scale.set(CONFIG.scale, CONFIG.scale, CONFIG.scale);
+    _dummyObj.rotation.set(pitch, yaw, roll);
+    _dummyObj.scale.set(finalScale, finalScale, finalScale);
     _dummyObj.updateMatrix();
     _boidInst.setMatrixAt(i, _dummyObj.matrix);
   }
   _boidInst.instanceMatrix.needsUpdate = true;
+  if (_boidInst.instanceColor) {
+    _boidInst.instanceColor.needsUpdate = true;
+  }
+}
+
+/* ========================= 
+ * Genome → Boid 매핑
+ * ========================= */
+
+function applyGenomeToBoid(index, genome) {
+  const g = genome || createFallbackGenome();
+  _genomes[index] = g;
+
+  // 기본 색상: hue/value → RGB
+  const hsv = hsvToRgb(g.hue ?? 190, 1.0, g.value ?? 0.6);
+  const baseCol = new THREE.Color(hsv.r, hsv.g, hsv.b);
+
+  // 패턴 악센트와 혼합해서 패턴 간 색을 명확히 구분
+  const accent =
+    PATTERN_ACCENT_COLORS[g.patternId] || PATTERN_ACCENT_COLORS[0];
+  const col = baseCol.clone().lerp(accent, 0.7); // 70%까지 강하게 끌어당겨 패턴별 색 크게 차이
+
+  _baseColors[index] = col;
+
+  if (_boidInst && _boidInst.setColorAt) {
+    _boidInst.setColorAt(index, col);
+  }
 }
 
 /* ========================= 
  * 공개 API
  * ========================= */
-export async function initBoids(scene, terrain) {
+export async function initBoids(scene, terrain, initialGenomes = null) {
   if (!terrain) return false;
   _terrain = terrain;
 
   const geom = await loadBoidGeometry();
   const mat = new THREE.MeshStandardMaterial({
-    color: 0x0099ad,
+    color: 0xffffff,
     roughness: 0.85,
     metalness: 0.05,
     side: THREE.DoubleSide,
+    vertexColors: true, // 인스턴스별 색상 적용 (Genome 색)
+    // RD 패턴은 발광 패턴으로만 사용해서 "검게 먹는" 현상을 피한다.
+    emissive: new THREE.Color(0xffffff),
+    emissiveIntensity: 0.4,
   });
+  // RD 패턴 텍스처를 발광 패턴으로 사용 (어두운 바탕 + 밝은 패턴이어도 전체가 검게 되지 않도록)
+  if (_rdTextures[0]) {
+    mat.emissiveMap = _rdTextures[0];
+    mat.emissiveMap.wrapS = mat.emissiveMap.wrapT = THREE.RepeatWrapping;
+    mat.emissiveMap.repeat.set(2, 2);
+    mat.emissiveMap.needsUpdate = true;
+  }
   _boidInst = new THREE.InstancedMesh(geom, mat, CONFIG.count);
   _boidInst.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   scene.add(_boidInst);
@@ -295,7 +508,7 @@ export async function initBoids(scene, terrain) {
     const z = THREE.MathUtils.randFloat(-halfD, halfD);
     const y0 =
       (_terrain.heightAtXZ(x, z) - _terrain.uniforms.seaLevel.value) *
-        _terrain.uniforms.heightScale.value +
+      _terrain.uniforms.heightScale.value +
       CONFIG.hover;
     _pos[i] = new THREE.Vector3(x, y0, z);
     const dir = new THREE.Vector3().setFromSphericalCoords(
@@ -305,6 +518,13 @@ export async function initBoids(scene, terrain) {
     );
     _vel[i] = dir.multiplyScalar(THREE.MathUtils.randFloat(3.0, 7.0));
     _acc[i] = new THREE.Vector3();
+
+    // Genome & 상태 초기화
+    const g = initialGenomes && initialGenomes[i] ? initialGenomes[i] : createFallbackGenome();
+    applyGenomeToBoid(i, g);
+    _states[i] = STATE_ALIVE;
+    _deathTimers[i] = 0;
+    _newbornTimers[i] = 0;
   }
 
   for (let i = 0; i < CONFIG.count; i++) {
@@ -325,10 +545,76 @@ export async function initBoids(scene, terrain) {
 
 export function updateBoids(dt) {
   if (!_boidInst || !_terrain) return;
-  updateBoidsLogic(dt);
+  const t = _simTime + dt;
+  updateBoidsLogic(dt, t);
 }
 
 export function getBoidsConfig() {
   return CONFIG;
 }
+
+/* ========================= 
+ * GA 연동용 헬퍼
+ * ========================= */
+
+/**
+ * 세대별 전역 틴트 색상을 설정한다.
+ * - 모든 인스턴스 색상(col)에 곱해져 Generation마다 전체 톤이 달라진다.
+ * - 머티리얼 발광색(emissive)에도 반영해 RD 패턴 광택 색도 함께 변화시킨다.
+ */
+export function setGenerationTint(colorLike) {
+  if (!_generationTint) _generationTint = new THREE.Color(0xffffff);
+  _generationTint.set(colorLike);
+
+  if (_boidInst && _boidInst.material && _boidInst.material.isMeshStandardMaterial) {
+    _boidInst.material.emissive.copy(_generationTint);
+    _boidInst.material.needsUpdate = true;
+  }
+}
+
+/**
+ * GA 선택 결과를 기반으로 생존자/도태된 개체의 상태를 표시한다.
+ * - survivors: 살아남은 인덱스
+ * - doomed: 죽어갈 인덱스
+ */
+export function markSelection(survivors, doomed, deathDuration = 2.0) {
+  _deathDuration = deathDuration;
+  const N = CONFIG.count;
+
+  for (let i = 0; i < N; i++) {
+    if (doomed.includes(i)) {
+      _states[i] = STATE_DYING;
+      _deathTimers[i] = 0;
+    } else if (survivors.includes(i)) {
+      _states[i] = STATE_ALIVE;
+      _deathTimers[i] = 0;
+    }
+  }
+}
+
+/**
+ * 새로운 세대의 Genome을 특정 인덱스들에만 적용한다.
+ * - population[i]는 i번째 boid에 대응하는 genome
+ * - indices가 없으면 전체에 적용
+ */
+export function applyPopulationGenomes(population, indices = null) {
+  const N = CONFIG.count;
+  const targetIndices = indices ?? Array.from({ length: N }, (_, i) => i);
+  for (const i of targetIndices) {
+    if (!population[i]) continue;
+    applyGenomeToBoid(i, population[i]);
+  }
+}
+
+/**
+ * 새로 태어나는 boid에 대해 newborn 애니메이션을 설정한다.
+ */
+export function markNewborn(indices, newbornDuration = 1.0) {
+  _newbornDuration = newbornDuration;
+  for (const i of indices) {
+    _states[i] = STATE_NEWBORN;
+    _newbornTimers[i] = 0;
+  }
+}
+
 
