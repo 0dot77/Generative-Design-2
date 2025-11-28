@@ -133,6 +133,7 @@ export class GeneticAlgorithm {
             bodyScale: randFloat(0.5, 2.0),
             baseSpeed: randFloat(0.5, 1.8),
             showOff: randFloat(0.0, 1.2),
+            genId: 0, // 0세대에서 시작
         };
         return g;
     }
@@ -324,6 +325,7 @@ export class GeneticAlgorithm {
             bodyScale: g.bodyScale,
             baseSpeed: g.baseSpeed,
             showOff: g.showOff,
+            genId: g.genId,
         };
     }
 
@@ -345,6 +347,7 @@ export class GeneticAlgorithm {
             bodyScale: (gA.bodyScale + gB.bodyScale) * 0.5 + randFloat(-0.1, 0.1),
             baseSpeed: (gA.baseSpeed + gB.baseSpeed) * 0.5 + randFloat(-0.05, 0.05),
             showOff: (gA.showOff + gB.showOff) * 0.5 + randFloat(-0.05, 0.05),
+            genId: this.generation + 1, // 자식은 다음 세대에 속함
         };
         return child;
     }
@@ -414,6 +417,7 @@ export class GeneticAlgorithm {
             const pB = this.population[this._selectParentIndex()];
             let child = this._crossover(pA, pB);
             child = this._mutate(child);
+            child.genId = this.generation + 1; // 새로 태어난 개체의 세대 표시
             newPop[idx] = child;
         }
 

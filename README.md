@@ -5,28 +5,32 @@
 ## 📁 프로젝트 구조
 
 ```
-gd9-plant/
-├── index.html              # 메인 HTML (main.js 로드)
-├── README.md              # 프로젝트 문서 (이 파일)
+GenerativeDesign/
+├── index.html              # 메인 HTML (src/main.js 로드)
+├── README.md               # 프로젝트 문서 (이 파일)
+├── ARCHITECTURE.md         # 상세 아키텍처 다이어그램/인터페이스
 ├── assets/
 │   ├── models/
-│   │   └── Datacolla_crypta.glb   # Boids 모델
+│   │   └── Datacolla_crypta.glb        # Boids/GLB 모델
 │   └── textures/
-│       └── RD.png         # (선택) Reaction-Diffusion 텍스처
+│       ├── rd_pattern.png              # RD 패턴 A
+│       ├── rd_pattern2.png             # RD 패턴 B
+│       ├── rd_pattern3.png             # RD 패턴 C
+│       ├── rd_pattern4.png             # RD 패턴 D
+│       └── rd_pattern5.png             # RD 패턴 E
 └── src/
-    ├── main.js            # 🎯 메인 진입점 (통합 관리)
+    ├── main.js            # 🎯 메인 진입점 (통합 관리 + GA 루프/GUI)
     ├── scene.js           # Scene, Camera, Renderer, Lights
-    ├── hud.js             # FPS/성능 HUD
+    ├── hud.js             # FPS/GA 요약 HUD
     ├── terrain.js         # 지형 생성 (서버 랙 구조)
-    ├── boids.js           # Boids 시뮬레이션
+    ├── boids.js           # Boids + GA Phenotype 매핑
     ├── plants.js          # L-System 식물 관리
     ├── lsystem.js         # L-System 코어 엔진
+    ├── interaction.js     # 마우스 인터랙션 (휴면 원형/클릭)
+    ├── ga.js              # Genetic Algorithm (Genome/Fitness/Selection)
     └── shaders/
         ├── terrain.vert.glsl
-        ├── terrain.frag.glsl
-        ├── rd_init.frag.glsl
-        ├── rd_update.frag.glsl
-        └── rd_display.frag.glsl
+        └── terrain.frag.glsl
 ```
 
 ## 🎮 모듈 구조
@@ -52,11 +56,12 @@ gd9-plant/
 - 높이맵 기반 지형 메쉬
 - 표면 샘플링 함수 (`heightAtXZ`, `normalAtXZ`)
 
-### 5. **boids.js** - Boids 시스템
+### 5. **boids.js** - Boids + GA 시스템
 - 군집 행동 알고리즘 (Alignment, Cohesion, Separation)
-- 지형 경계 제한
-- 표면 추종 로직
+- 지형 경계 제한 + 표면 추종 로직
 - InstancedMesh 기반 렌더링
+- Genome(색/패턴/크기/속도/요란함) → 시각/운동 파라미터 매핑
+- 세대별 죽음/탄생 애니메이션, 세대별 컬러 틴트 반영
 
 ### 6. **plants.js** - 식물 관리
 - 복도 위치 자동 탐지
@@ -69,6 +74,16 @@ gd9-plant/
 - Turtle Graphics 인터프리터
 - 그물 구조 (Merge 로직)
 - 환경 자극 시스템
+
+### 8. **interaction.js** - 마우스 인터랙션
+- 마우스 위치에 네트워크 상태 원형 표시
+- 클릭 시 반경 내 L-System 식물 휴면/해제 (10초 타이머)
+
+### 9. **ga.js** - Genetic Algorithm 코어
+- Genome 정의 (hue/value/patternId/bodyScale/baseSpeed/showOff)
+- Fitness 함수 (Palette/Pattern/Size/Movement/Synergy)
+- Selection(상위 30% 생존), Crossover, Mutation
+- 세대별 population 관리, survivors/doomed 인덱스 제공
 
 ## 🎮 키보드 컨트롤
 
@@ -110,11 +125,15 @@ open http://localhost:8080
 - 전하 구슬 (실시간 색상/발광 변화)
 - 그물 구조 (가지 merge)
 
-### 3. **Boids 군집**
-- 120개 개체
-- 지형 표면 추종
-- 경계 제한 (bounce)
-- 자연스러운 군집 행동
+### 3. **Boids 군집 + 유전 알고리즘**
+- 약 40개 Boids 개체 (Genome 1:1 매핑)
+- 지형 표면 추종 + 경계 제한 (bounce)
+- Reaction-Diffusion 텍스처 기반 표면 무늬
+- Genetic Algorithm:
+  - 색/패턴 타입/크기/속도/요란함을 유전
+  - 상위 30% 생존, 나머지는 자식 Genome으로 교체
+  - 세대별 전역 컬러 틴트 → 세대마다 무리 색 분위기 크게 변화
+  - HUD에 패턴 분포(P0~P4), 평균 scale/speed/showOff, best fitness 표시
 
 ### 4. **실시간 환경 반응**
 - 열 수준 → 전하 구슬 색상 (시안 → 빨강)

@@ -51,11 +51,10 @@ const CONFIG = {
 };
 
 // 상태
-let _boidInst = null;
+const _boidMeshes = []; // per-boid Mesh (InstancedMesh 대신)
 const _pos = [];
 const _vel = [];
 const _acc = [];
-const _dummyObj = new THREE.Object3D();
 let _terrain = null;
 
 // GA 연동: Genome / 생애 상태
@@ -67,7 +66,6 @@ const _newbornTimers = [];
 let _deathDuration = 2.0;
 let _newbornDuration = 1.0;
 let _simTime = 0;
-let _generationTint = new THREE.Color(0xffffff);
 
 const STATE_ALIVE = "alive";
 const STATE_DYING = "dying";
@@ -82,6 +80,15 @@ const PATTERN_ACCENT_COLORS = [
   new THREE.Color(0x3b7bff), // C: 코발트 블루 (blobs)
   new THREE.Color(0xff7bff), // D: 마젠타 계열 (fine_stripes)
   new THREE.Color(0xffc54b), // E: 앰버/골드 (hybrid)
+];
+
+// 세대별 팔레트 (Genome.genId 기반으로 세대 느낌을 살짝 달리 줄 때 사용)
+const GENERATION_TINTS = [
+  new THREE.Color(0x4cc9f0), // Gen 0 계열: 밝은 시안
+  new THREE.Color(0xf72585), // Gen 1 계열: 마젠타
+  new THREE.Color(0xffca3a), // Gen 2 계열: 옐로우/오렌지
+  new THREE.Color(0x8ac926), // Gen 3 계열: 라임 그린
+  new THREE.Color(0xff6b6b), // Gen 4 계열: 코럴 레드
 ];
 
 /* ========================= 
@@ -351,16 +358,15 @@ function updateBoidsLogic(dt, t) {
     const state = _states[i];
     const genome = _genomes[i];
     const speedFactor = genome && typeof genome.baseSpeed === "number" ? genome.baseSpeed : 1.0;
+    const mesh = _boidMeshes[i];
+    if (!mesh) continue;
 
     if (state === STATE_DEAD) {
-      // 죽은 개체는 보이지 않도록 매우 작은 스케일로 고정
-      _dummyObj.position.copy(_pos[i]);
-      _dummyObj.scale.setScalar(0.0001);
-      _dummyObj.rotation.set(0, 0, 0);
-      _dummyObj.updateMatrix();
-      _boidInst.setMatrixAt(i, _dummyObj.matrix);
+      // 죽은 개체는 보이지 않도록 숨김
+      mesh.visible = false;
       continue;
     }
+    mesh.visible = true;
 
     const p = _pos[i];
     const v = _vel[i];
@@ -417,33 +423,10 @@ function updateBoidsLogic(dt, t) {
 
     const finalScale = baseScale * scaleMul;
 
-    // 인스턴스 색상: baseColor + 상태에 따른 보정
-    const baseColor = _baseColors[i] || new THREE.Color(0x0099ad);
-    const col = baseColor.clone();
-    if (state === STATE_DYING) {
-      const tNorm = Math.min(1.0, _deathTimers[i] / _deathDuration);
-      col.lerp(new THREE.Color(0x000000), tNorm); // 점점 어둡게
-    } else if (state === STATE_NEWBORN) {
-      const tNorm = Math.min(1.0, _newbornTimers[i] / _newbornDuration);
-      // 살짝 더 밝게 반짝였다가 정상으로
-      const glow = baseColor.clone().offsetHSL(0, 0, 0.2);
-      col.lerp(glow, 1.0 - Math.abs(1.0 - 2.0 * tNorm)); // 중간에서 가장 밝게
-    }
-    // 세대별 틴트 적용 (기존 텍스처/색 위에 세대 색을 곱해 전반적인 톤을 바꾼다)
-    col.multiply(_generationTint);
-    if (_boidInst && _boidInst.setColorAt) {
-      _boidInst.setColorAt(i, col);
-    }
-
-    _dummyObj.position.copy(p);
-    _dummyObj.rotation.set(pitch, yaw, roll);
-    _dummyObj.scale.set(finalScale, finalScale, finalScale);
-    _dummyObj.updateMatrix();
-    _boidInst.setMatrixAt(i, _dummyObj.matrix);
-  }
-  _boidInst.instanceMatrix.needsUpdate = true;
-  if (_boidInst.instanceColor) {
-    _boidInst.instanceColor.needsUpdate = true;
+    // 위치/회전/스케일을 직접 Mesh에 적용
+    mesh.position.copy(p);
+    mesh.rotation.set(pitch, yaw, roll);
+    mesh.scale.set(finalScale, finalScale, finalScale);
   }
 }
 
@@ -455,19 +438,39 @@ function applyGenomeToBoid(index, genome) {
   const g = genome || createFallbackGenome();
   _genomes[index] = g;
 
-  // 기본 색상: hue/value → RGB
-  const hsv = hsvToRgb(g.hue ?? 190, 1.0, g.value ?? 0.6);
-  const baseCol = new THREE.Color(hsv.r, hsv.g, hsv.b);
-
-  // 패턴 악센트와 혼합해서 패턴 간 색을 명확히 구분
-  const accent =
-    PATTERN_ACCENT_COLORS[g.patternId] || PATTERN_ACCENT_COLORS[0];
-  const col = baseCol.clone().lerp(accent, 0.7); // 70%까지 강하게 끌어당겨 패턴별 색 크게 차이
+  // ★ 디버그/시각화를 위해, 세대(genId)에 따라 "완전히 다른 단색"을 준다.
+  //   → 텍스쳐/조명 영향 없이 세대 차이가 즉시 눈에 들어오도록.
+  const genId = typeof g.genId === "number" ? g.genId : 0;
+  let col;
+  switch (genId % 6) {
+    case 0:
+      col = new THREE.Color(0xffffff); // 0세대: 흰색
+      break;
+    case 1:
+      col = new THREE.Color(0xff0000); // 1세대: 빨강
+      break;
+    case 2:
+      col = new THREE.Color(0x00ff00); // 2세대: 초록
+      break;
+    case 3:
+      col = new THREE.Color(0x0000ff); // 3세대: 파랑
+      break;
+    case 4:
+      col = new THREE.Color(0xffff00); // 4세대: 노랑
+      break;
+    case 5:
+    default:
+      col = new THREE.Color(0xff00ff); // 5세대: 마젠타
+      break;
+  }
 
   _baseColors[index] = col;
 
-  if (_boidInst && _boidInst.setColorAt) {
-    _boidInst.setColorAt(index, col);
+  const mesh = _boidMeshes[index];
+  if (mesh && mesh.material && mesh.material.isMeshStandardMaterial) {
+    mesh.material.color.copy(col);
+    mesh.material.emissive.copy(col).multiplyScalar(0.2);
+    mesh.material.needsUpdate = true;
   }
 }
 
@@ -479,26 +482,25 @@ export async function initBoids(scene, terrain, initialGenomes = null) {
   _terrain = terrain;
 
   const geom = await loadBoidGeometry();
-  const mat = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
-    roughness: 0.85,
-    metalness: 0.05,
-    side: THREE.DoubleSide,
-    vertexColors: true, // 인스턴스별 색상 적용 (Genome 색)
-    // RD 패턴은 발광 패턴으로만 사용해서 "검게 먹는" 현상을 피한다.
-    emissive: new THREE.Color(0xffffff),
-    emissiveIntensity: 0.4,
-  });
-  // RD 패턴 텍스처를 발광 패턴으로 사용 (어두운 바탕 + 밝은 패턴이어도 전체가 검게 되지 않도록)
-  if (_rdTextures[0]) {
-    mat.emissiveMap = _rdTextures[0];
-    mat.emissiveMap.wrapS = mat.emissiveMap.wrapT = THREE.RepeatWrapping;
-    mat.emissiveMap.repeat.set(2, 2);
-    mat.emissiveMap.needsUpdate = true;
+  const baseTex = _rdTextures[0] || null;
+
+  for (let i = 0; i < CONFIG.count; i++) {
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      roughness: 0.6,
+      metalness: 0.2,
+      side: THREE.DoubleSide,
+    });
+    if (baseTex) {
+      mat.map = baseTex;
+      mat.map.wrapS = mat.map.wrapT = THREE.RepeatWrapping;
+      mat.map.repeat.set(2, 2);
+      mat.map.needsUpdate = true;
+    }
+    const mesh = new THREE.Mesh(geom, mat);
+    scene.add(mesh);
+    _boidMeshes[i] = mesh;
   }
-  _boidInst = new THREE.InstancedMesh(geom, mat, CONFIG.count);
-  _boidInst.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  scene.add(_boidInst);
 
   const halfW = 200 * 0.5 - CONFIG.boundMargin;
   const halfD = 200 * 0.5 - CONFIG.boundMargin;
@@ -527,49 +529,18 @@ export async function initBoids(scene, terrain, initialGenomes = null) {
     _newbornTimers[i] = 0;
   }
 
-  for (let i = 0; i < CONFIG.count; i++) {
-    const p = _pos[i];
-    const v = _vel[i];
-    const yaw = Math.atan2(v.x, v.z);
-    _dummyObj.position.copy(p);
-    _dummyObj.rotation.set(0, yaw, 0);
-    _dummyObj.scale.set(CONFIG.scale, CONFIG.scale, CONFIG.scale);
-    _dummyObj.updateMatrix();
-    _boidInst.setMatrixAt(i, _dummyObj.matrix);
-  }
-  _boidInst.instanceMatrix.needsUpdate = true;
-
   console.log(`[Boids] ${CONFIG.count}개 초기화 완료`);
   return true;
 }
 
 export function updateBoids(dt) {
-  if (!_boidInst || !_terrain) return;
+  if (_boidMeshes.length === 0 || !_terrain) return;
   const t = _simTime + dt;
   updateBoidsLogic(dt, t);
 }
 
 export function getBoidsConfig() {
   return CONFIG;
-}
-
-/* ========================= 
- * GA 연동용 헬퍼
- * ========================= */
-
-/**
- * 세대별 전역 틴트 색상을 설정한다.
- * - 모든 인스턴스 색상(col)에 곱해져 Generation마다 전체 톤이 달라진다.
- * - 머티리얼 발광색(emissive)에도 반영해 RD 패턴 광택 색도 함께 변화시킨다.
- */
-export function setGenerationTint(colorLike) {
-  if (!_generationTint) _generationTint = new THREE.Color(0xffffff);
-  _generationTint.set(colorLike);
-
-  if (_boidInst && _boidInst.material && _boidInst.material.isMeshStandardMaterial) {
-    _boidInst.material.emissive.copy(_generationTint);
-    _boidInst.material.needsUpdate = true;
-  }
 }
 
 /**

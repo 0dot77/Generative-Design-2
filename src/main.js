@@ -11,7 +11,6 @@ import {
   markSelection,
   markNewborn,
   getBoidsConfig,
-  setGenerationTint,
 } from "./boids.js";
 import { initPlants, updatePlants, getPlants } from "./plants.js";
 import { initInteraction, updateInteraction } from "./interaction.js";
@@ -48,14 +47,6 @@ const DEATH_ANIM_DURATION = 2.0;
 const SURVIVORS_WINDOW = 1.5;
 const NEWBORN_ANIM_DURATION = 1.0;
 
-// 세대별 전역 틴트 팔레트 (기존 RD 텍스처 위에 곱해져 세대 톤이 확 달라지도록)
-const GENERATION_TINTS = [
-  0x4cc9f0, // 밝은 시안
-  0xf72585, // 마젠타
-  0xffca3a, // 옐로우/오렌지
-  0x8ac926, // 라임 그린
-  0xff6b6b, // 코럴 레드
-];
 
 /* ========================= 
  * 초기화
@@ -115,9 +106,6 @@ async function init() {
     slotPatternIds,
   });
   const initialPopulation = state.ga.initPopulation();
-
-  // 초기 세대(0) 전역 틴트 적용
-  setGenerationTint(GENERATION_TINTS[0]);
 
   state.boidsReady = await initBoids(scene, state.terrain, initialPopulation);
   if (state.boidsReady) {
@@ -322,10 +310,6 @@ function applyNextGeneration() {
   // doomed 슬롯에만 새 genome 적용
   applyPopulationGenomes(newPop, doomed);
   markNewborn(doomed, NEWBORN_ANIM_DURATION);
-
-  // 새 세대 index에 따라 전역 틴트 변경 (세대별 톤이 확 달라짐)
-  const tintIdx = state.generation % GENERATION_TINTS.length;
-  setGenerationTint(GENERATION_TINTS[tintIdx]);
 
   // 새 세대 population 요약 (fitness는 이전 세대 기준)
   updateGASummary(newPop, null, state.generation);
