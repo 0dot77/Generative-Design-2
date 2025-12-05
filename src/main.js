@@ -11,6 +11,7 @@ import {
   markSelection,
   markNewborn,
   getBoidsConfig,
+  slimeParams,
 } from "./boids.js";
 import { initPlants, updatePlants, getPlants } from "./plants.js";
 import { initInteraction, updateInteraction } from "./interaction.js";
@@ -203,6 +204,30 @@ function setupGAControls() {
   fGA.add(state, "autoRun").name("Auto Run");
   fGA.add({ next: () => triggerNextGeneration() }, "next").name("Next Generation");
   fGA.add(state, "generation").name("Generation").listen();
+
+  // ───────────────────────────────
+  // Slime / Trail & Sensing 파라미터 HUD
+  // ───────────────────────────────
+  const fSlime = gui.addFolder("Slime / Trail");
+  fSlime
+    .add(slimeParams, "TRAIL_DEPOSIT_AMOUNT", 0.1, 3.0, 0.05)
+    .name("Trail Deposit");
+  fSlime
+    .add(slimeParams, "TRAIL_DECAY_RATE", 0.90, 0.995, 0.0005)
+    .name("Trail Decay");
+  fSlime
+    .add(slimeParams, "W_TRAIL_FOLLOW", 0.0, 10.0, 0.1)
+    .name("Trail Follow");
+  fSlime
+    .add(slimeParams, "SENSOR_DISTANCE", 2, 40, 0.5)
+    .name("Sensor Dist");
+
+  // SENSOR_ANGLE은 라디안 값이지만, 사용성을 위해 대략 15~90도에 해당하는 범위로 제한
+  const deg15 = THREE.MathUtils.degToRad(15);
+  const deg90 = THREE.MathUtils.degToRad(90);
+  fSlime
+    .add(slimeParams, "SENSOR_ANGLE", deg15, deg90, THREE.MathUtils.degToRad(1))
+    .name("Sensor Angle (rad)");
 }
 
 function updateGASummary(population, evalInfo, generationLabel) {

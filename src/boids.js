@@ -3,6 +3,31 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import * as BufferGeometryUtils from "three/addons/utils/BufferGeometryUtils.js";
 
+// 보이드들이 움직이는 월드 반경 (x,z에서 -R ~ +R)
+// terrainSize.width/depth가 200으로 설정되어 있으므로 여기서는 100으로 맞춘다.
+const BOUND_RADIUS = 100;
+
+// ───────────────────────────────
+// Slime Mold Sensing / Trail
+// ───────────────────────────────
+
+// HUD(lil-gui)에서 조정할 수 있는 슬라임/트레일 파라미터 모음
+// → main.js에서 import { slimeParams } 해서 슬라이더에 바인딩한다.
+export const slimeParams = {
+  TRAIL_DEPOSIT_AMOUNT: 2.0,
+  TRAIL_DECAY_RATE: 0.97,        // 1에 가깝게 → 천천히 사라짐 (길 유지)
+  W_TRAIL_FOLLOW: 3.0,           // trail을 더 강하게 따라가도록
+  SENSOR_DISTANCE: 12,           // 아이데이션에 맞게 조정
+  SENSOR_ANGLE: Math.PI / 4,     // 45도, 미로면 더 좁게, 탐험형이면 더 넓게 (라디안)
+};
+
+const TRAIL_GRID_SIZE = 128;             // trail 해상도 (128x128)
+const TRAIL_CELL_SIZE = (BOUND_RADIUS * 2) / TRAIL_GRID_SIZE;
+
+const W_NUTRIENT = 1.0;                  // 영양원 attraction 가중치
+
+let trailGrid = new Float32Array(TRAIL_GRID_SIZE * TRAIL_GRID_SIZE);
+
 // RD 패턴 텍스처 경로 (GA 설계 기반)
 const RD_TEXTURE_PATHS = [
   "./assets/textures/rd_pattern.png", // 0
@@ -290,6 +315,106 @@ function limitVec3(v, maxLen) {
   return v;
 }
 
+// ───────────────────────────────
+// Nutrient Field / Attraction
+// ───────────────────────────────
+
+// 최대 10개의 영양원
+const NUTRIENT_COUNT = 10;
+
+// 각 영양원: 산 지형 위 특정 위치, 열/시간에 따라 strength가 다름
+// - pos: THREE.Vector3 (월드 좌표, 렉/호수 근처 등)
+// - strength: 0~1 정도 (열이 막 올랐을 때 1에 가깝게, 시간이 지나면 감소 등)
+// - active: true 일 때만 force에 기여 (열이 꺼졌거나 먹혔으면 false)
+const _nutrients = new Array(NUTRIENT_COUNT).fill(null).map(() => ({
+  pos: new THREE.Vector3(),
+  strength: 0.0,
+  active: false,
+}));
+
+/**
+ * 환경/열 시스템 쪽에서 프레임마다 영양원 상태를 갱신할 때 사용할 수 있는 헬퍼.
+ * (원하지 않으면 사용 안 해도 됨. 필요한 곳에서 _nutrients 배열을 직접 만져도 됨.)
+ */
+export function setNutrientState(index, pos, strength, active = true) {
+  if (index < 0 || index >= NUTRIENT_COUNT) return;
+  const n = _nutrients[index];
+  n.pos.copy(pos);
+  n.strength = strength;
+  n.active = active;
+}
+
+/**
+ * 개체가 영양을 먹었거나, 열이 완전히 식어서 영양원이 사라졌을 때 호출.
+ */
+export function clearNutrient(index) {
+  if (index < 0 || index >= NUTRIENT_COUNT) return;
+  const n = _nutrients[index];
+  n.active = false;
+  n.strength = 0.0;
+}
+
+/**
+ * 영양원 force 계산
+ * - pos: 에이전트 위치 (THREE.Vector3)
+ * - return: 영양원 쪽 방향 (단위 벡터)
+ *   - 길이 0이면 "이번 프레임엔 영양원 영향 없음"을 의미
+ */
+export function getNutrientForce(pos) {
+  // 가비지 줄이기 위해 재사용하는 임시 벡터
+  const dirAccum = new THREE.Vector3(0, 0, 0);
+  let totalWeight = 0.0;
+
+  for (let i = 0; i < NUTRIENT_COUNT; i++) {
+    const n = _nutrients[i];
+    if (!n.active || n.strength <= 0.0) continue;
+
+    // 현재 위치에서 영양원까지의 방향
+    const dx = n.pos.x - pos.x;
+    const dy = n.pos.y - pos.y;
+    const dz = n.pos.z - pos.z;
+
+    const distSq = dx * dx + dy * dy + dz * dz;
+    if (distSq < 1e-4) {
+      // 거의 같은 위치면 방향 정보가 의미 없으므로 스킵
+      continue;
+    }
+
+    const dist = Math.sqrt(distSq);
+    const invDist = 1.0 / dist;
+
+    // 단위 방향 벡터
+    const ux = dx * invDist;
+    const uy = dy * invDist;
+    const uz = dz * invDist;
+
+    // 거리와 강도를 함께 반영한 가중치
+    // - 가까울수록(invDist) + 강할수록(strength) 더 크게 끌어당김
+    const weight = n.strength * invDist;
+
+    dirAccum.x += ux * weight;
+    dirAccum.y += uy * weight;
+    dirAccum.z += uz * weight;
+    totalWeight += weight;
+  }
+
+  // 활성 영양원이 없거나, 실질적으로 힘이 없으면 영향 없음
+  if (totalWeight <= 1e-6) {
+    return new THREE.Vector3(0, 0, 0);
+  }
+
+  // 가중 평균 방향 벡터
+  dirAccum.multiplyScalar(1.0 / totalWeight);
+
+  // 혹시라도 수치적으로 거의 0이면 영향 없음 처리
+  if (dirAccum.lengthSq() < 1e-6) {
+    return new THREE.Vector3(0, 0, 0);
+  }
+
+  // 반드시 normalize된 단위벡터 반환
+  return dirAccum.normalize();
+}
+
 function updateBoidsLogic(dt, t) {
   _simTime = t;
   const N = CONFIG.count;
@@ -349,6 +474,15 @@ function updateBoidsLogic(dt, t) {
       acc.addScaledVector(sep, CONFIG.separationWeight);
     }
 
+    // ① 영양원 force: 영양원 방향 단위벡터를 acc에 더한다.
+    const nutrientDir = getNutrientForce(pi);
+    if (nutrientDir.lengthSq() > 0) {
+      acc.addScaledVector(nutrientDir, W_NUTRIENT);
+    }
+
+    // ② trail sensing force: 슬라임 몰드식 trail 따라가기
+    applyTrailSensingForce(i, acc);
+
     acc.x += (Math.random() - 0.5) * 0.2;
     acc.z += (Math.random() - 0.5) * 0.2;
   }
@@ -381,6 +515,9 @@ function updateBoidsLogic(dt, t) {
     );
     limitVec3(v, CONFIG.maxSpeed * speedFactor);
     p.addScaledVector(v, dt);
+    // ▼ 위치가 최종적으로 업데이트된 직후, 해당 지점에 trail을 남긴다.
+    //    (이 줄 바로 아래에 depositTrail(p.x, p.z)를 호출하도록 설계)
+    depositTrail(p.x, p.z);
 
     // 기본 회전 (진행 방향)
     const yaw = Math.atan2(v.x, v.z);
@@ -421,13 +558,37 @@ function updateBoidsLogic(dt, t) {
       }
     }
 
-    const finalScale = baseScale * scaleMul;
+    // 현재 위치의 trail 강도를 0~1로 정규화해서 읽는다.
+    const trailStrength = getTrailStrengthAt(p);
+
+    // trail이 강한 곳일수록 약간 더 크게 보이도록 스케일 배수 적용
+    // (0.9 ~ 1.5 사이에서 보간, 지나가는 자취는 "색" 위주로 표현)
+    const visScaleMul = THREE.MathUtils.lerp(0.9, 1.5, trailStrength);
+    const finalScale = baseScale * scaleMul * visScaleMul;
 
     // 위치/회전/스케일을 직접 Mesh에 적용
     mesh.position.copy(p);
     mesh.rotation.set(pitch, yaw, roll);
     mesh.scale.set(finalScale, finalScale, finalScale);
+
+    // trail이 강할수록 "색깔"과 발광으로 지나간 자취를 강조
+    const mat = mesh.material;
+    const baseCol = _baseColors[i];
+    if (mat && mat.isMeshStandardMaterial && baseCol) {
+      // 기본 Genome 색을 유지하되, trail이 강할수록 "뜨거운" 색으로 틴트
+      const colorLerp = trailStrength; // 0~1 사이 그대로 사용
+      _tmpTrailColor.copy(baseCol).lerp(_trailHotColor, colorLerp);
+      mat.color.copy(_tmpTrailColor);
+
+      // emissive는 baseCol 대신 hot color 기준으로 강하게 발광
+      const emissiveStrength = THREE.MathUtils.lerp(0.0, 3.0, trailStrength);
+      mat.emissive.copy(_trailHotColor).multiplyScalar(emissiveStrength);
+    }
   }
+
+  // ▼ 모든 에이전트가 trail을 남긴 뒤, 프레임마다 전체 trail을 서서히 감쇠시킨다.
+  //    (trailGrid[i] *= TRAIL_DECAY_RATE)
+  decayTrail();
 }
 
 /* ========================= 
@@ -539,6 +700,67 @@ export function updateBoids(dt) {
   updateBoidsLogic(dt, t);
 }
 
+// ───────────────────────────────
+// Sensing force / Trail 시각화용 임시 벡터/색상
+// ───────────────────────────────
+const _yAxis = new THREE.Vector3(0, 1, 0);
+const _tmpDir = new THREE.Vector3();
+const _tmpLeftDir = new THREE.Vector3();
+const _tmpRightDir = new THREE.Vector3();
+const _tmpTrailColor = new THREE.Color();
+const _trailHotColor = new THREE.Color(0xffaa00); // trail이 강한 곳을 강조할 색
+
+function applyTrailSensingForce(agentIndex, accOut) {
+  const pos = _pos[agentIndex];
+  const vel = _vel[agentIndex];
+  if (!pos || !vel) return;
+
+  // 속도가 거의 없으면 방향 판단 불가능 → skip
+  if (vel.lengthSq() < 1e-6) return;
+
+  // 1) 현재 진행 방향 단위벡터
+  _tmpDir.copy(vel).normalize();
+
+  // 2) 좌/우 센서 방향 (현재 방향 기준 회전)
+  _tmpLeftDir.copy(_tmpDir).applyAxisAngle(_yAxis, +slimeParams.SENSOR_ANGLE);
+  _tmpRightDir.copy(_tmpDir).applyAxisAngle(_yAxis, -slimeParams.SENSOR_ANGLE);
+
+  // 3) 센서 위치 (샘플링 지점)
+  const fx = pos.x + _tmpDir.x * slimeParams.SENSOR_DISTANCE;
+  const fz = pos.z + _tmpDir.z * slimeParams.SENSOR_DISTANCE;
+
+  const lx = pos.x + _tmpLeftDir.x * slimeParams.SENSOR_DISTANCE;
+  const lz = pos.z + _tmpLeftDir.z * slimeParams.SENSOR_DISTANCE;
+
+  const rx = pos.x + _tmpRightDir.x * slimeParams.SENSOR_DISTANCE;
+  const rz = pos.z + _tmpRightDir.z * slimeParams.SENSOR_DISTANCE;
+
+  // 4) trail 값 샘플링
+  const valF = sampleTrail(fx, fz);
+  const valL = sampleTrail(lx, lz);
+  const valR = sampleTrail(rx, rz);
+
+  // 5) 가장 강한 값의 방향 선택
+  let bestDir = _tmpDir;
+  let bestVal = valF;
+
+  if (valL > bestVal) {
+    bestVal = valL;
+    bestDir = _tmpLeftDir;
+  }
+  if (valR > bestVal) {
+    bestVal = valR;
+    bestDir = _tmpRightDir;
+  }
+
+  // 거의 신호가 없으면 steer 필요 없음
+  if (bestVal <= 0.001) return;
+
+  // 6) 그 방향으로 힘을 추가
+  accOut.addScaledVector(bestDir, slimeParams.W_TRAIL_FOLLOW * bestVal);
+}
+
+
 export function getBoidsConfig() {
   return CONFIG;
 }
@@ -588,4 +810,53 @@ export function markNewborn(indices, newbornDuration = 1.0) {
   }
 }
 
+/* ========================= 
+ * Slime Mold Sensing / Trail
+ * 환경을 기록하고 읽어내기 위한 시스템
+ * ========================= */
 
+// 보이드 주변의 trail 시각 강도 상한값 (경험적으로 조정)
+// - 작은 trail도 강하게 보이도록 과감하게 낮춘 값
+const MAX_TRAIL_VIS_VALUE = 1.0; // 경험적으로 조정
+
+// 보이드 주변의 trail 강도를 0~1로 정규화해서 반환하는 함수
+function getTrailStrengthAt(pos) {
+  if (!pos) return 0.0;
+  const raw = sampleTrail(pos.x, pos.z);
+  let norm = raw / MAX_TRAIL_VIS_VALUE;
+  norm = THREE.MathUtils.clamp(norm, 0.0, 1.0);
+  // 낮은 값도 더 부각되도록 감마(루트) 적용
+  return Math.sqrt(norm);
+}
+
+function worldToTrailIndex(x, z) {
+  // 월드(-BOUND_RADIUS ~ +BOUND_RADIUS)를 0~1로 매핑
+  const u = (x + BOUND_RADIUS) / (BOUND_RADIUS * 2);
+  const v = (z + BOUND_RADIUS) / (BOUND_RADIUS * 2);
+
+  const ix = Math.floor(
+    THREE.MathUtils.clamp(u, 0, 0.999) * TRAIL_GRID_SIZE
+  );
+  const iz = Math.floor(
+    THREE.MathUtils.clamp(v, 0, 0.999) * TRAIL_GRID_SIZE
+  );
+
+  return ix + iz * TRAIL_GRID_SIZE;
+}
+
+function sampleTrail(x, z) {
+  const idx = worldToTrailIndex(x, z);
+  return trailGrid[idx];
+}
+
+function depositTrail(x, z, amount) {
+  const idx = worldToTrailIndex(x, z);
+  const a = amount != null ? amount : slimeParams.TRAIL_DEPOSIT_AMOUNT;
+  trailGrid[idx] += a;
+}
+
+function decayTrail() {
+  for (let i = 0; i < trailGrid.length; i++) {
+    trailGrid[i] *= slimeParams.TRAIL_DECAY_RATE;
+  }
+}
