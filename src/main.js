@@ -16,6 +16,81 @@ import {
 import { initPlants, updatePlants, getPlants } from "./plants.js";
 import { initInteraction, updateInteraction } from "./interaction.js";
 import { GeneticAlgorithm } from "./ga.js";
+const Tone = window.Tone;
+
+if (!Tone) {
+  console.error(
+    "[audio] Tone.js가 로드되지 않았습니다. index.html 스크립트 순서를 확인하세요."
+  );
+}
+
+/* ========================= 
+ * 에이전트 기반 사운드 유틸
+ * ========================= */
+function playAgentSoundFromValue(value) {
+  if (!Tone) {
+    console.warn(
+      "[audio] Tone.js가 로드되지 않아서 에이전트 사운드를 재생할 수 없습니다."
+    );
+    return;
+  }
+
+  // 브라우저 오디오 정책: 최초 한 번은 사용자 제스처 안에서 Tone.start()가 호출되어야 함.
+  // 여기서는 컨텍스트가 이미 running인지 확인만 하고, 아니면 조용히 패스한다.
+  if (Tone.getContext().state !== "running") {
+    // console.warn("[audio] AudioContext가 아직 running 상태가 아니라서 사운드를 건너뜁니다.");
+    return;
+  }
+
+  // 1) 값 클램프 (0~10)
+  const v = Math.max(0, Math.min(10, value || 0));
+
+  // 2) 에너지(0~10) -> 필터 컷오프 기본값 (300Hz ~ 8000Hz)
+  const minCutoff = 300;
+  const maxCutoff = 8000;
+  const baseCutoff = minCutoff + (v / 10) * (maxCutoff - minCutoff);
+
+  // 3) "움직일 때마다 랜덤한 값을 갖는 것처럼" 들리도록, 컷오프에 랜덤 지터 추가
+  const jitterAmount = 0.6; // 0.0~1.0 정도 (0.6이면 ±30% 정도 출렁)
+  const jitterFactor = 1 + (Math.random() - 0.5) * jitterAmount;
+  const targetCutoff = Math.max(200, Math.min(12000, baseCutoff * jitterFactor));
+
+  // 4) 싱글톤 Synth + Filter 생성 (매 호출마다 새로 만드는 대신 재사용)
+  if (!playAgentSoundFromValue._filter || !playAgentSoundFromValue._synth) {
+    const filter = new Tone.Filter(800, "lowpass").toDestination();
+
+    const synth = new Tone.Synth({
+      oscillator: { type: "triangle" },
+      envelope: {
+        attack: 0.005,
+        decay: 0.12,
+        sustain: 0.0,
+        release: 0.15,
+      },
+    }).connect(filter);
+
+    playAgentSoundFromValue._filter = filter;
+    playAgentSoundFromValue._synth = synth;
+  }
+
+  const filter = playAgentSoundFromValue._filter;
+  const synth = playAgentSoundFromValue._synth;
+
+  // 5) 음 높이도 완전 랜덤이지만 음악적으로 들리도록 제한된 스케일 사용 (C 메이저 펜타토닉)
+  const scale = ["C4", "D4", "E4", "G4", "A4", "C5"];
+  const idx = Math.floor(Math.random() * scale.length);
+  const note = scale[idx];
+
+  // 6) Tone.js 오디오 타임 기준으로 짧은 사운드 + filter sweep 스케줄링
+  const now = Tone.now();
+
+  // 이전에 예약된 filter frequency 변경을 지우고, 짧게 목표 cutoff로 램프
+  filter.frequency.cancelScheduledValues(now);
+  filter.frequency.linearRampToValueAtTime(targetCutoff, now + 0.03);
+
+  // 짧은 음 한 번 재생
+  synth.triggerAttackRelease(note, "16n", now);
+}
 
 /* ========================= 
  * 애플리케이션 상태
@@ -181,6 +256,8 @@ function animate() {
  * 시작
  * ========================= */
 init().then(() => {
+  // 씬과 렌더러가 모두 준비된 뒤에 클릭 사운드 리스너 등록
+  setupAudioDebugClickSound();
   animate();
 });
 
@@ -191,6 +268,7 @@ if (typeof window !== "undefined") {
   window.appState = state;
   window.THREE = THREE;
   window.triggerNextGeneration = triggerNextGeneration;
+  window.playAgentSoundFromValue = playAgentSoundFromValue;
 }
 
 /* ========================= 
@@ -345,3 +423,43 @@ function applyNextGeneration() {
 }
 
 
+// 렌더러 클릭할 때마다 항상 "띵" 소리 (랜덤 음정)
+function setupAudioDebugClickSound() {
+  if (!Tone) {
+    console.warn("[audio] Tone.js가 없어서 클릭 사운드를 설정하지 못했습니다.");
+    return;
+  }
+
+  if (!state.renderer || !state.renderer.domElement) {
+    console.warn("[audio] renderer가 아직 준비되지 않아 클릭 사운드를 설정하지 못했습니다.");
+    return;
+  }
+
+  const canvas = state.renderer.domElement;
+
+  // 클릭 시 사용할 음계 (듣기 좋은 C 메이저 펜타토닉)
+  const notes = ["C4", "D4", "E4", "G4", "A4", "C5"];
+
+  canvas.addEventListener("pointerdown", async (ev) => {
+    console.log("[audio] pointerdown:", ev.type);
+
+    try {
+      // 오디오 컨텍스트 시작 + 강제 resume
+      await Tone.start();
+      await Tone.getContext().resume();
+      console.log("[audio] AudioContext state =", Tone.getContext().state);
+
+      // 클릭할 때마다 새 Synth 생성 → 항상 안전하게 소리 남
+      const clickSynth = new Tone.Synth().toDestination();
+
+      // 랜덤 음 선택
+      const idx = Math.floor(Math.random() * notes.length);
+      const note = notes[idx];
+
+      console.log("[audio] trigger note:", note);
+      clickSynth.triggerAttackRelease(note, "8n");
+    } catch (err) {
+      console.error("[audio] Tone.start() / resume 실패:", err);
+    }
+  });
+}

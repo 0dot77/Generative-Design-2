@@ -584,6 +584,36 @@ function updateBoidsLogic(dt, t) {
       const emissiveStrength = THREE.MathUtils.lerp(0.0, 3.0, trailStrength);
       mat.emissive.copy(_trailHotColor).multiplyScalar(emissiveStrength);
     }
+
+    // ───────────────────────────────
+    // 에이전트 기반 사운드 트리거
+    // - 속도 / trail / 영양원 영향도를 하나의 value(0~10)로 매핑
+    // - 매 프레임 전부 울리면 과하므로, 확률적으로 일부만 재생
+    // ───────────────────────────────
+    if (typeof window !== "undefined" && window.playAgentSoundFromValue) {
+      // 너무 많은 사운드 폭주를 막기 위한 간단한 샘플링 (약 2% 확률)
+      if (Math.random() < 0.02) {
+        // 1) 속도 기반 value (0~10)
+        const speed = v.length();
+        const maxSpeedForThis = CONFIG.maxSpeed * speedFactor;
+        const speedNorm =
+          maxSpeedForThis > 1e-5 ? THREE.MathUtils.clamp(speed / maxSpeedForThis, 0, 1) : 0;
+        let value = speedNorm * 10.0;
+
+        // 2) trailStrength로 value 증폭 (길 위에 있을수록 더 "핫"하게)
+        const trailBoost = 0.7 + trailStrength * 0.6; // 0.7~1.3 배
+        value *= trailBoost;
+
+        // 3) 영양원 영향도 (0~1 가정)를 보너스로 더해줌
+        const nutrientDir = getNutrientForce(p);
+        const nutrientInfluence = THREE.MathUtils.clamp(nutrientDir.length(), 0, 1);
+        value += nutrientInfluence * 3.0;
+
+        // 4) 최종 클램프 후 사운드 트리거
+        value = THREE.MathUtils.clamp(value, 0, 10);
+        window.playAgentSoundFromValue(value);
+      }
+    }
   }
 
   // ▼ 모든 에이전트가 trail을 남긴 뒤, 프레임마다 전체 trail을 서서히 감쇠시킨다.
