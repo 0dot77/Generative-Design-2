@@ -12,6 +12,8 @@ import {
   markNewborn,
   getBoidsConfig,
   slimeParams,
+  getBoidsDensityMetric,
+  getBoidsAliveCount,
 } from "./boids.js";
 import { initPlants, updatePlants, getPlants } from "./plants.js";
 import { initInteraction, updateInteraction } from "./interaction.js";
@@ -90,6 +92,106 @@ function playAgentSoundFromValue(value) {
 
   // 짧은 음 한 번 재생
   synth.triggerAttackRelease(note, "16n", now);
+}
+
+/* ========================= 
+ * 환경 기반 배경 앰비언트 유틸
+ * ========================= */
+function updateEnvironmentSound(envValue) {
+  if (!Tone) {
+    console.warn("[audio-env] Tone.js가 없어서 환경 사운드를 사용할 수 없습니다.");
+    return;
+  }
+
+  // AudioContext가 아직 unlock되지 않았으면(사용자 제스처 전) 조용히 패스
+  if (Tone.getContext().state !== "running") {
+    return;
+  }
+
+  // 1) 노드 초기화 (한 번만)
+  if (!updateEnvironmentSound._nodes) {
+    const envBus = new Tone.Gain(0.6).toDestination();
+
+    // 저역 드론 (서버 팬/험 느낌)
+    const lowFilter = new Tone.Filter(200, "lowpass").connect(envBus);
+    const lowOsc = new Tone.Oscillator({
+      type: "triangle",
+      frequency: 65, // 대략 C2 근처
+      volume: -12,
+    }).connect(lowFilter);
+    lowOsc.start();
+
+    // 노이즈/글리치 레이어 (density에 강하게 반응)
+    const noise = new Tone.Noise("pink");
+    const noiseFilter = new Tone.Filter({
+      type: "bandpass",
+      frequency: 1200,
+      Q: 1.0,
+    });
+    const noiseGain = new Tone.Gain(0.05); // 꽤 낮은 레벨에서 시작
+    noise.connect(noiseFilter);
+    noiseFilter.connect(noiseGain);
+    noiseGain.connect(envBus);
+    noise.start();
+
+    updateEnvironmentSound._nodes = {
+      envBus,
+      lowFilter,
+      lowOsc,
+      noise,
+      noiseFilter,
+      noiseGain,
+    };
+
+    // 스무딩용 내부 상태
+    updateEnvironmentSound._smoothed = 0.0;
+  }
+
+  const { lowFilter, noiseFilter, noiseGain } = updateEnvironmentSound._nodes;
+
+  // 2) envValue(0~10) → 0~1 정규화 + 스무딩
+  const rawNorm = Math.max(0, Math.min(1, (envValue || 0) / 10));
+  const prev = updateEnvironmentSound._smoothed ?? rawNorm;
+
+  // EMA 형태 스무딩 (값이 천천히 따라가도록)
+  //  - 0.08 정도면 수 초 내에 꽤 분명한 변화가 느껴짐
+  const alpha = 0.08;
+  const smoothed = prev + (rawNorm - prev) * alpha;
+  updateEnvironmentSound._smoothed = smoothed;
+
+  const now = Tone.now();
+
+  // 3) 매핑: density ↑ → 노이즈/글리치 ↑, 약간 더 답답해짐
+
+  // (a) 노이즈 레이어 볼륨
+  //  - 거의 안 들리던 상태 → 상당히 거친 상태까지 더 넓게
+  const minGain = 0.02;
+  const maxGain = 0.6;
+  const noiseGainTarget = minGain + smoothed * (maxGain - minGain);
+  noiseGain.gain.cancelScheduledValues(now);
+  noiseGain.gain.setTargetAtTime(noiseGainTarget, now, 1.5);
+
+  // (b) 노이즈 bandpass 중심 주파수
+  //  - 낮은 density에서는 400Hz 근처, 높을수록 6kHz 근처까지
+  const minFreq = 400;
+  const maxFreq = 6000;
+  const bpFreqTarget = minFreq + smoothed * (maxFreq - minFreq);
+  noiseFilter.frequency.cancelScheduledValues(now);
+  noiseFilter.frequency.setTargetAtTime(bpFreqTarget, now, 1.5);
+
+  // (c) bandpass Q (밀집할수록 더 날카롭게)
+  const minQ = 0.5;
+  const maxQ = 4.0;
+  const bpQTarget = minQ + smoothed * (maxQ - minQ);
+  noiseFilter.Q.cancelScheduledValues(now);
+  noiseFilter.Q.setTargetAtTime(bpQTarget, now, 1.5);
+
+  // (d) 저역 드론 필터도 좀 더 크게 반응 (전체 톤의 무게감 변화)
+  const lowMin = 80;
+  const lowMax = 320;
+  const lowFreqTarget = lowMin + smoothed * (lowMax - lowMin);
+  lowFilter.frequency.cancelScheduledValues(now);
+  lowFilter.frequency.setTargetAtTime(lowFreqTarget, now, 2.0);
 }
 
 /* ========================= 
@@ -233,6 +335,27 @@ function animate() {
   // 식물 업데이트
   if (state.plantsReady) {
     updatePlants(time, dt);
+  }
+
+  // 환경 기반 배경 사운드 업데이트
+  if (state.boidsReady) {
+    // boids.js에서 계산된 평균 이웃 수(군집도) + 살아있는 개체 수를 함께 사용
+    const densityMetric = getBoidsDensityMetric(); // 평균 neighbor 수 (0 이상)
+    const aliveCount = getBoidsAliveCount(); // 살아있는 boid 수
+    const maxBoids = getBoidsConfig().count || 40;
+
+    // 0~1 정규화
+    const densityNorm = Math.max(0, Math.min(1, densityMetric / 10));
+    const aliveNorm = Math.max(0, Math.min(1, aliveCount / maxBoids));
+
+    // 둘을 반반 섞어서 환경 값으로 사용 (군집도+개체수)
+    const envNormRaw = 0.5 * densityNorm + 0.5 * aliveNorm;
+
+    // 상위 쪽 변화를 더 강조하기 위해 약간 감마 적용
+    const envNorm = Math.pow(envNormRaw, 1.2);
+    const envValue = envNorm * 10; // 0~10 스케일로 변환
+
+    updateEnvironmentSound(envValue);
   }
 
   // 마우스 인터랙션 업데이트

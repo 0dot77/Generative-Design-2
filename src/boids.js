@@ -91,6 +91,10 @@ const _newbornTimers = [];
 let _deathDuration = 2.0;
 let _newbornDuration = 1.0;
 let _simTime = 0;
+// 현재 프레임 기준 평균 이웃 수(군집도) 메트릭
+let _avgNeighborCount = 0;
+// 현재 프레임 기준 살아있는 boid 수
+let _aliveCount = 0;
 
 const STATE_ALIVE = "alive";
 const STATE_DYING = "dying";
@@ -420,6 +424,10 @@ function updateBoidsLogic(dt, t) {
   const N = CONFIG.count;
   for (let i = 0; i < N; i++) _acc[i].set(0, 0, 0);
 
+  // 환경 사운드용 density 메트릭 계산을 위한 누적 변수
+  let totalNeighborCount = 0;
+  let aliveCountForDensity = 0;
+
   for (let i = 0; i < N; i++) {
     if (_states[i] === STATE_DEAD) continue;
     const pi = _pos[i];
@@ -441,6 +449,10 @@ function updateBoidsLogic(dt, t) {
         if (d < CONFIG.separationRadius && d > 1e-3)
           sep.add(pi.clone().sub(pj).multiplyScalar(1.0 / d));
       }
+
+    // density 메트릭용 누적 (alive 개체들만 대상)
+    totalNeighborCount += cnt;
+    aliveCountForDensity++;
 
     const acc = _acc[i];
     const genome = _genomes[i];
@@ -486,6 +498,16 @@ function updateBoidsLogic(dt, t) {
     acc.x += (Math.random() - 0.5) * 0.2;
     acc.z += (Math.random() - 0.5) * 0.2;
   }
+
+  // 이번 프레임 기준 평균 이웃 수(군집도) 계산
+  if (aliveCountForDensity > 0) {
+    _avgNeighborCount = totalNeighborCount / aliveCountForDensity;
+  } else {
+    _avgNeighborCount = 0;
+  }
+
+  // 이번 프레임 기준 살아있는 boid 개수 기록
+  _aliveCount = aliveCountForDensity;
 
   const terrainSize = { width: 200, depth: 200 };
   for (let i = 0; i < N; i++) {
@@ -793,6 +815,17 @@ function applyTrailSensingForce(agentIndex, accOut) {
 
 export function getBoidsConfig() {
   return CONFIG;
+}
+
+// 현재 Boids 군집도 메트릭을 반환 (평균 이웃 수, 0 이상)
+// - main.js의 환경 사운드에서 0~10 범위로 스케일링해서 사용
+export function getBoidsDensityMetric() {
+  return _avgNeighborCount;
+}
+
+// 현재 살아있는 boid 수를 반환
+export function getBoidsAliveCount() {
+  return _aliveCount;
 }
 
 /**
